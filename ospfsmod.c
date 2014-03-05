@@ -216,7 +216,15 @@ ospfs_inode_data(ospfs_inode_t *oi, uint32_t offset)
 	return (uint8_t *) ospfs_block(blockno) + (offset % OSPFS_BLKSIZE);
 }
 
-
+static inline void
+ospfs_zero_out_block(uint32_t blockno) 
+{
+    char *block_data = (char *)ospfs_block(blockno);
+    int i;
+    for (i = 0; i < OSPFS_BLKSIZE; i++) {
+        block_data[i] = 0;
+    }
+}
 /*****************************************************************************
  * LOW-LEVEL FILE SYSTEM FUNCTIONS
  * There are no exercises in this section, and you don't need to understand
@@ -666,6 +674,11 @@ static int32_t
 indir_index(uint32_t b)
 {
 	// Your code here.
+	if (b >= OSPFS_NDIRECT + OSPFS_NINDIRECT) {
+	    return ((b - OSPFS_NDIRECT - OSPFS_NINDIRECT) / OSPFS_NINDIRECT);
+	} else if (b >= OSPFS_NDIRECT) {
+	    return 0;
+	}
 	return -1;
 }
 
@@ -683,6 +696,13 @@ static int32_t
 direct_index(uint32_t b)
 {
 	// Your code here.
+	if (b >= OSPFS_NDIRECT + OSPFS_NINDIRECT) {
+	    return ((b - OSPFS_NDIRECT - OSPFS_NINDERICET) % OSPFS_NINDIRECT);
+	} else if (b >= OSPFS_NDIRECT) {
+	    return (b - OSPFS_NDIRECT);
+	} else if (b >= 0) {
+	    return b;
+	}
 	return -1;
 }
 
@@ -728,6 +748,129 @@ add_block(ospfs_inode_t *oi)
 	uint32_t *allocated[2] = { 0, 0 };
 
 	/* EXERCISE: Your code here */
+	int32_t indir2_index = indir2_index(n);
+	int32_t indir_index = indir_index(n);
+	int32_t direct_index = direct_index(n);
+	
+    if (indir2_index == -1 && indir_index == -1 && direct_index != -1) {
+        // Case 1: new block within direct blocks:
+        allocated[0] = allocate_block();
+        if (allocated[0]) {
+            ospfs_zero_out_block(allocated[0]);
+            oi->oi_direct[direct_index] = allocated[0];
+            oi->oi_size += OSPFS_BLKSIZE;
+            return 0;
+        } else {
+            return -ENOSPC;
+        }
+    } else if (indir2_index == -1 && direct_index != -1) {
+        // Case 2: new block within indirect block:
+        if (oi->oi_indirect == 0) {
+            // Case 2.1: indirect block has not been set up yet.
+            allocated[0] = allocate_block(); // Allocate the indirect block.
+            if (allocated[0]) {
+                ospfs_zero_out_block(allocated[0]);
+            } else {
+                return -ENOSPC;
+            }
+            
+            allocated[1] = allocate_block(); // Allocate the data block.
+            if (allocated[1]) {
+                ospfs_zero_out_block(allocated[1]);
+                oi->oi_indirect = allocated[0];
+                uint32_t *indirect_block = (uint32_t *)ospfs_block(allocated[0]);
+                indirect_block[direct_index] = allocated[1];
+                oi->oi_size += OSPFS_BLKSIZE;
+            } else {
+                free_block(allocated[0]);
+                return -ENOSPC;
+            }
+        } else {
+            // Case 2.2: indirect block has been set up.
+            allocated[0] = allocate_block();
+            if (allocated[0]) {
+                ospfs_zero_out_block(allocated[0]);
+                uint32_t *indirect_block = (uint32_t *)ospfs_block(oi->oi_indirect);
+                indirect_block[direct_index] = allocated[0];
+                oi->oi_size += OSPFS_BLKSIZE;
+            } else {
+                return -ENOSPC;
+            }
+        }
+    } else if (direct_index != -1){
+        // Case 3: new block within indirect^2 block.
+        if (indir_index == 0 && direct_index == 0) {
+            // Case 3.1: the indirect^2 block has not been set up yet.
+            allocated[0] = allocate_block();
+            if (allocated[0]) {
+                ospfs_zero_out_block(allocated[0]);
+            } else {
+                return -ENOSPC;
+            }
+            
+            allocated[1] = allocate_block();
+            if (allocated[1]) {
+                ospfs_zero_out_block(allocated[1]);
+            } else {
+                free_block(allocated[0]);
+                return -ENOSPC;
+            }
+            
+            uint32_t direct = allocate_block();
+            if (direct) {
+                ospfs_zero_out_block(direct);
+                oi->oi_indirect2 = allocated[0];
+                uint32_t *indirect2_block = (uint32_t *)ospfs_block(allocated[0]);
+                indirect2_block[indir_index] = allocated[1];
+                uint32_t *indirect_block = (uint32_t *)ospfs_block(allocated[1]);
+                indirect_block[direct_index] = direct;
+                oi->oi_size += OSPFS_BLKSIZE;
+                return 0;
+            } else {
+                free_block(allocated[0]);
+                free_block(allocated[1]);
+                return -ENOSPC;
+            }
+        } else {
+            // Case 3.2: the indirect^2 block has been set up.
+            if (direct_index == 0) {
+                // Case 3.2.1: the indirect block has not been set up yet.
+                allocated[0] = allocate_block();
+                if (allocated[0]) {
+                    ospfs_zero_out_block(allocated[0]);
+                } else {
+                    return -ENOSPC;
+                }
+                
+                allocated[1] = allocate_block();
+                if (allocated[1]) {
+                    ospfs_zero_out_block(allocated[1]);
+                    uint32_t *indirect2_block = (uint32_t *)ospfs_block(oi->oi_indirect2);
+                    indirect2_block[indirect_index] = allocated[0];
+                    uint32_t *indirect_block = (uint32_t *)ospfs_block(allocated[0]);
+                    indirect_block[direct_index] = allocated[1];
+                    oi->oi_size += OSPFS_BLKSIZE;
+                    return 0;
+                } else {
+                    free_block(allocated[0]);
+                    return -ENOSPC;
+                }
+            } else {
+                // Case 3.2.2: the indirect block has been set up.
+                allocated[0] = allocate_block();
+                if (allocated[0]) {
+                    uint32_t *indirect2_block = (uint32_t *)ospfs_block(oi->oi_indirect2);
+                    uint32_t *indirect_block = (uint32_t *)(indirect2_block[indir_index]);
+                    indirect_block[direct_index] = allocated[0];
+                    oi->oi_size += OSPFS_BLKSIZE;
+                } else {
+                    return -ENOSPC;
+                }
+            }
+        }
+    }
+	
+	
 	return -EIO; // Replace this line
 }
 
