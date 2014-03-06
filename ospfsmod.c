@@ -754,6 +754,7 @@ add_block(ospfs_inode_t *oi)
 	
     if (v_indir2_index == -1 && v_indir_index == -1 && v_direct_index != -1) {
         // Case 1: new block within direct blocks:
+        eprintk("Case 1\n");
         allocated[0] = allocate_block();
         if (allocated[0]) {
             ospfs_zero_out_block(allocated[0]);
@@ -765,8 +766,10 @@ add_block(ospfs_inode_t *oi)
         }
     } else if (v_indir2_index == -1 && v_direct_index != -1) {
         // Case 2: new block within indirect block:
-        if (oi->oi_indirect == 0) {
+        eprintk("Case 2\n");
+        if (oi->oi_direct == 0) {
             // Case 2.1: indirect block has not been set up yet.
+            eprintk("    Case 2.1\n");
             allocated[0] = allocate_block(); // Allocate the indirect block.
             if (allocated[0]) {
                 ospfs_zero_out_block(allocated[0]);
@@ -788,6 +791,7 @@ add_block(ospfs_inode_t *oi)
             }
         } else {
             // Case 2.2: indirect block has been set up.
+            eprintk("    Case 2.2\n");
             allocated[0] = allocate_block();
             if (allocated[0]) {
                 ospfs_zero_out_block(allocated[0]);
@@ -801,8 +805,10 @@ add_block(ospfs_inode_t *oi)
         }
     } else if (direct_index != -1){
         // Case 3: new block within indirect^2 block.
+        eprintk("Case 3\n");
         if (v_indir_index == 0 && v_direct_index == 0) {
             // Case 3.1: the indirect^2 block has not been set up yet.
+            eprintk("    Case 3.1\n");
             allocated[0] = allocate_block();
             if (allocated[0]) {
                 ospfs_zero_out_block(allocated[0]);
@@ -835,8 +841,10 @@ add_block(ospfs_inode_t *oi)
             }
         } else {
             // Case 3.2: the indirect^2 block has been set up.
+            eprintk("    Case 3.2\n");
             if (v_direct_index == 0) {
                 // Case 3.2.1: the indirect block has not been set up yet.
+                eprintk("        Case 3.2.1\n");
                 allocated[0] = allocate_block();
                 if (allocated[0]) {
                     ospfs_zero_out_block(allocated[0]);
@@ -859,6 +867,7 @@ add_block(ospfs_inode_t *oi)
                 }
             } else {
                 // Case 3.2.2: the indirect block has been set up.
+                eprintk("        Case 3.2.2\n");
                 allocated[0] = allocate_block();
                 if (allocated[0]) {
                     uint32_t *indirect2_block = (uint32_t *)ospfs_block(oi->oi_indirect2);
@@ -1384,12 +1393,17 @@ ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dent
 	
 	memcpy(od->od_name, dst_dentry->d_name.name, dst_dentry->d_name.len);
 	od->od_name[dst_dentry->d_name.len] = 0;
-	
 	ospfs_inode_t *oi = ospfs_inode(src_dentry->d_inode->i_ino);
 	oi->oi_nlink++;
-	dst_dentry->d_inode->i_ino = src_dentry->d_inode->i_ino;
+	eprintk("Break!\n");
 	od->od_ino = src_dentry->d_inode->i_ino;
-	return 0;
+	{
+		struct inode *i = ospfs_mk_linux_inode(dir->i_sb, src_dentry->d_inode->i_ino);
+		if (!i)
+			return -ENOMEM;
+		d_instantiate(dst_dentry, i);
+		return 0;
+	}
 }
 
 // ospfs_create
@@ -1520,9 +1534,51 @@ ospfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 	ospfs_inode_t *dir_oi = ospfs_inode(dir->i_ino);
 	uint32_t entry_ino = 0;
 
-	/* EXERCISE: Your code here. */
-	return -EINVAL;
+	if (find_direntry(dir_oi, dentry->d_name.name, dentry->d_name.len) != NULL) {
+	    return -EEXIST;
+	}
+	
+	eprintk("    Left find_direntry(...)\n");
+    if (dentry->d_name.len > OSPFS_MAXNAMELEN
+    	|| strlen(symname) > OSPFS_MAXSYMLINKLEN) {
+        return -ENAMETOOLONG;
+    }
+    
+    // Finding a new direntry.
+    eprintk("    Will call create_blank_direntry(...)\n");
+    ospfs_direntry_t *new_od = create_blank_direntry(dir_oi);
+    printk("    Left create_blank_direntry(...)\n");
+    printk("    new_od pointer points to %p\n", new_od);
+    if (IS_ERR(new_od)) {
+        return PTR_ERR(new_od);
+    }
+    
+    // Finding a new inode.
+    ospfs_inode_t *new_oi;
+    for (; entry_ino < ospfs_super->os_ninodes; entry_ino++) {
+        new_oi = ospfs_inode(entry_ino);
+        if (new_oi && new_oi->oi_nlink == 0) {
+            break;
+        }
+        new_oi = NULL;
+    }
+    
+    if (!new_oi) {
+        return -ENOSPC;
+    }
 
+    // Initialize the direntry.
+    new_od->od_ino = entry_ino;
+    memcpy(&new_od->od_name, dentry->d_name.name, dentry->d_name.len);
+    new_od->od_name[dentry->d_name.len] = 0;
+
+    // Initialize the symlink inode.
+    ospfs_symlink_inode_t *new_osi = (ospfs_symlink_inode_t *)new_oi;
+    new_osi->oi_size = strlen(symname);
+    new_osi->oi_ftype = OSPFS_FTYPE_SYMLINK;
+    new_osi->oi_nlink = 1;
+    strcpy(new_osi->oi_symlink, symname);
+    
 	/* Execute this code after your function has successfully created the
 	   file.  Set entry_ino to the created file's inode number before
 	   getting here. */
