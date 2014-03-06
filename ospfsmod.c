@@ -781,6 +781,7 @@ add_block(ospfs_inode_t *oi)
                 uint32_t *indirect_block = (uint32_t *)ospfs_block(allocated[0]);
                 indirect_block[v_direct_index] = allocated[1];
                 oi->oi_size += OSPFS_BLKSIZE;
+                return 0;
             } else {
                 free_block(allocated[0]);
                 return -ENOSPC;
@@ -793,6 +794,7 @@ add_block(ospfs_inode_t *oi)
                 uint32_t *indirect_block = (uint32_t *)ospfs_block(oi->oi_indirect);
                 indirect_block[v_direct_index] = allocated[0];
                 oi->oi_size += OSPFS_BLKSIZE;
+                return 0;
             } else {
                 return -ENOSPC;
             }
@@ -863,6 +865,7 @@ add_block(ospfs_inode_t *oi)
                     uint32_t *indirect_block = (uint32_t *)(indirect2_block[v_indir_index]);
                     indirect_block[v_direct_index] = allocated[0];
                     oi->oi_size += OSPFS_BLKSIZE;
+                    return 0;
                 } else {
                     return -ENOSPC;
                 }
@@ -1018,8 +1021,10 @@ change_size(ospfs_inode_t *oi, uint32_t new_size)
 	            remove_block(oi);
 	        }
 	        oi->oi_size = old_size;
+	        eprintk("        add_block(...) returned -ENOSPC.\n");
 	        return retval;
 	    } else {
+	        eprintk("        add_block(...) returned -EIO.\n");
 	        return retval;
 	    }
 	}
@@ -1256,7 +1261,17 @@ find_direntry(ospfs_inode_t *dir_oi, const char *name, int namelen)
 	return 0;
 }
 
-
+static ospfs_direntry_t *
+find_blank_direntry(ospfs_inode_t *dir_oi)
+{
+	int off;
+	for (off = 0; off < dir_oi->oi_size; off += OSPFS_DIRENTRY_SIZE) {
+		ospfs_direntry_t *od = ospfs_inode_data(dir_oi, off);
+		if (!od->od_ino)
+			return od;
+	}
+	return 0;
+}
 // create_blank_direntry(dir_oi)
 //	'dir_oi' is an OSP inode for a directory.
 //	Return a blank directory entry in that directory.  This might require
@@ -1296,7 +1311,29 @@ create_blank_direntry(ospfs_inode_t *dir_oi)
 	//    entries and return one of them.
 
 	/* EXERCISE: Your code here. */
-	return ERR_PTR(-EINVAL); // Replace this line
+	eprintk("    In create_blank_direntry(...)\n");
+	eprintk("        Will call find_blank_direntry(...)\n");
+	ospfs_direntry_t *retptr = find_blank_direntry(dir_oi);
+	eprintk("        Left find_blank_direntry(...)\n");
+	eprintk("        find_blank_direntry(...) returns %p\n", retptr);
+	if (retptr != NULL) {
+	    return retptr; 
+	}
+	eprintk("        Will call add_block(...)\n");
+	int retval = add_block(dir_oi);
+	eprintk("        Left add_block(...)\n");
+	eprintk("        add_block(...) returns %d\n", retval);
+	if (retval == 0) {
+	    eprintk("        Will call find_blank_direntry(...)\n");
+	    retptr = find_blank_direntry(dir_oi);
+	    eprintk("        Left find_blank_direntry(...)\n");
+	    eprintk("        find_blank_direntry(...) returns %p\n", retptr);
+	    if (retptr != NULL) {
+	        return retptr;
+	    }
+	}
+	
+	return ERR_PTR(retval);
 }
 
 // ospfs_link(src_dentry, dir, dst_dentry
@@ -1305,7 +1342,7 @@ create_blank_direntry(ospfs_inode_t *dir_oi)
 //
 //   Inputs: src_dentry   -- a pointer to the dentry for the source file.  This
 //                           file's inode contains the real data for the hard
-//                           linked filae.  The important elements are:
+//                           linked file.  The important elements are:
 //                             src_dentry->d_name.name
 //                             src_dentry->d_name.len
 //                             src_dentry->d_inode->i_ino
@@ -1331,7 +1368,28 @@ create_blank_direntry(ospfs_inode_t *dir_oi)
 static int
 ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dentry) {
 	/* EXERCISE: Your code here. */
-	return -EINVAL;
+	ospfs_inode_t *dir_oi = ospfs_inode(dir->i_ino);
+	
+	if (dst_dentry->d_name.len > OSPFS_MAXNAMELEN) {
+	    return -ENAMETOOLONG;
+	}
+	if (find_direntry(dir_oi, dst_dentry->d_name.name, dst_dentry->d_name.len)) {
+	    return -EEXIST;
+	}
+	
+	ospfs_direntry_t *od = create_blank_direntry(dir_oi);
+	if (IS_ERR(od)) {
+	    return PTR_ERR(od);
+	}
+	
+	memcpy(od->od_name, dst_dentry->d_name.name, dst_dentry->d_name.len);
+	od->od_name[dst_dentry->d_name.len] = 0;
+	
+	ospfs_inode_t *oi = ospfs_inode(src_dentry->d_inode->i_ino);
+	oi->oi_nlink++;
+	dst_dentry->d_inode->i_ino = src_dentry->d_inode->i_ino;
+	od->od_ino = src_dentry->d_inode->i_ino;
+	return 0;
 }
 
 // ospfs_create
@@ -1369,8 +1427,58 @@ ospfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidat
 	ospfs_inode_t *dir_oi = ospfs_inode(dir->i_ino);
 	uint32_t entry_ino = 0;
 	/* EXERCISE: Your code here. */
-	return -EINVAL; // Replace this line
-
+	eprintk("In ospfs_create(...)\n");
+	eprintk("    Will call find_direntry(...)\n");
+	
+	if (find_direntry(dir_oi, dentry->d_name.name, dentry->d_name.len) != NULL) {
+	    return -EEXIST;
+	}
+	
+	eprintk("    Left find_direntry(...)\n");
+    if (dentry->d_name.len > OSPFS_MAXNAMELEN) {
+        return -ENAMETOOLONG;
+    }
+    
+    // Finding a new direntry.
+    eprintk("    Will call create_blank_direntry(...)\n");
+    ospfs_direntry_t *new_od = create_blank_direntry(dir_oi);
+    printk("    Left create_blank_direntry(...)\n");
+    printk("    new_od pointer points to %p\n", new_od);
+    if (IS_ERR(new_od)) {
+        return PTR_ERR(new_od);
+    }
+    
+    // Finding a new inode.
+    ospfs_inode_t *new_oi;
+    for (; entry_ino < ospfs_super->os_ninodes; entry_ino++) {
+        new_oi = ospfs_inode(entry_ino);
+        if (new_oi && new_oi->oi_nlink == 0) {
+            break;
+        }
+        new_oi = NULL;
+    }
+    
+    if (!new_oi) {
+        return -ENOSPC;
+    }
+    
+    // Initialize inode.
+    new_oi->oi_size = 0;
+    new_oi->oi_ftype = OSPFS_FTYPE_REG;
+    new_oi->oi_nlink = 1;
+    new_oi->oi_mode = mode;
+    int i;
+    for (i = 0; i < OSPFS_NDIRECT; i++) {
+        new_oi->oi_direct[i] = 0;
+    }
+    new_oi->oi_indirect = 0;
+    new_oi->oi_indirect2 = 0;
+    
+    // Initializa direntry;
+    new_od->od_ino = entry_ino;
+    memcpy(&new_od->od_name, dentry->d_name.name, dentry->d_name.len);
+    new_od->od_name[dentry->d_name.len] = 0;
+    
 	/* Execute this code after your function has successfully created the
 	   file.  Set entry_ino to the created file's inode number before
 	   getting here. */
