@@ -1555,8 +1555,8 @@ ospfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
     // Finding a new direntry.
     eprintk("    Will call create_blank_direntry(...)\n");
     ospfs_direntry_t *new_od = create_blank_direntry(dir_oi);
-    printk("    Left create_blank_direntry(...)\n");
-    printk("    new_od pointer points to %p\n", new_od);
+    eprintk("    Left create_blank_direntry(...)\n");
+    eprintk("    new_od pointer points to %p\n", new_od);
     if (IS_ERR(new_od)) {
         return PTR_ERR(new_od);
     }
