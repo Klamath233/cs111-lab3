@@ -29,8 +29,11 @@
  * KERN_EMERG so that you are sure to see the messages.  By default, the
  * kernel does not print all messages to the console.  Levels like KERN_ALERT
  * and KERN_EMERG will make sure that you will see messages.) */
+#ifdef DEBUG
 #define eprintk(format, ...) printk(KERN_NOTICE format, ## __VA_ARGS__)
-
+#else
+#define eprintk(format, ...)
+#endif
 // The actual disk data is just an array of raw memory.
 // The initial array is defined in fsimg.c, based on your 'base' directory.
 extern uint8_t ospfs_data[];
@@ -614,7 +617,7 @@ free_block(uint32_t blockno)
 	if (blockno >= ospfs_super->os_firstinob + ospfs_super->os_ninodes / OSPFS_BLKINODES
 	    && blockno < ospfs_super->os_nblocks)
 	{
-	    bitvector_clear(vector, (int)blockno);
+	    bitvector_set(vector, (int)blockno);
 	}
 }
 
@@ -767,7 +770,7 @@ add_block(ospfs_inode_t *oi)
     } else if (v_indir2_index == -1 && v_direct_index != -1) {
         // Case 2: new block within indirect block:
         eprintk("Case 2\n");
-        if (oi->oi_direct == 0) {
+        if (oi->oi_indirect == 0) {
             // Case 2.1: indirect block has not been set up yet.
             eprintk("    Case 2.1\n");
             allocated[0] = allocate_block(); // Allocate the indirect block.
@@ -921,7 +924,8 @@ remove_block(ospfs_inode_t *oi)
         int32_t direct_idx = direct_index(blkno_to_rm);
         int32_t indir_idx = indir_index(blkno_to_rm);
         int32_t indir2_idx = indir2_index(blkno_to_rm);
-        
+        eprintk("indirect_block no.: %u n: %u direct: %d indir: %d indir2: %d\n", oi->oi_indirect, n, direct_idx, indir_idx, indir2_idx);
+   
         if (indir_idx == -1 && indir2_idx == -1 && direct_idx != -1) {
             // Case 1: removing direct block.
             free_block(oi->oi_direct[direct_idx]);
@@ -934,7 +938,7 @@ remove_block(ospfs_inode_t *oi)
                 uint32_t *indir_blk = (uint32_t *)ospfs_block(oi->oi_indirect);
                 free_block(indir_blk[direct_idx]);
                 indir_blk[direct_idx] = 0;
-                if (direct_idx == 0) { // If the direct block is the last one in the indirect block.
+                if (blkno_to_rm - 1 < OSPFS_NDIRECT) { // If the direct block is the last one in the indirect block.
                     // Also, free the indirect block.
                     free_block(oi->oi_indirect);
                     oi->oi_indirect = 0;
@@ -1039,6 +1043,9 @@ change_size(ospfs_inode_t *oi, uint32_t new_size)
 	}
 	while (ospfs_size2nblocks(oi->oi_size) > ospfs_size2nblocks(new_size)) {
 	        /* EXERCISE: Your code here */
+		eprintk("        oi_size is %u\n", oi->oi_size);
+		eprintk("        new_size is %u\n", new_size);
+		eprintk("        Will call remove_block(...).\n");
 	    remove_block(oi);
 	}
 
@@ -1046,6 +1053,7 @@ change_size(ospfs_inode_t *oi, uint32_t new_size)
 	             and return the proper value. */
 	oi->oi_size = new_size;
 	eprintk("        New size is %u\n", new_size);
+	eprintk("        indirect_block is %u\n", oi->oi_indirect);
 	return 0;
 }
 
@@ -1129,14 +1137,13 @@ ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 			goto done;
 		}
 
-		data = ospfs_block(blockno);
 		// Figure out how much data is left in this block to read.
 		// Copy data into user space. Return -EFAULT if unable to write
 		// into user space.
 		// Use variable 'n' to track number of bytes moved.
 		/* EXERCISE: Your code here */
 		
-		if (ospfs_inode_blockno(oi, count + *f_pos - amount) > blockno) {
+		if (*f_pos % OSPFS_BLKSIZE + count - amount > OSPFS_BLKSIZE) {
 		    n = OSPFS_BLKSIZE - *f_pos % OSPFS_BLKSIZE;
 		} else {
 		    n = count - amount;
@@ -1144,8 +1151,8 @@ ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 		
 		data = (char *)ospfs_block(blockno);
 		// eprintk("    n = %u\n", n);
-		if (copy_to_user(buffer, &data[*f_pos % OSPFS_BLKSIZE], n) != 0) {
-		    retval = -EFAULT;
+		retval = copy_to_user(buffer, &data[*f_pos % OSPFS_BLKSIZE], n);
+		if (retval < 0) {
 		    goto done;
 		}
 		buffer += n;
@@ -1215,21 +1222,22 @@ ospfs_write(struct file *filp, const char __user *buffer, size_t count, loff_t *
 			goto done;
 		}
 
-		data = ospfs_block(blockno);
+		data = (char *)ospfs_block(blockno);
 
 		// Figure out how much data is left in this block to write.
 		// Copy data from user space. Return -EFAULT if unable to read
 		// read user space.
 		// Keep track of the number of bytes moved in 'n'.
 		/* EXERCISE: Your code here */
-		if (ospfs_inode_blockno(oi, count + *f_pos - amount) > blockno) {
+		if (*f_pos % OSPFS_BLKSIZE + count - amount > OSPFS_BLKSIZE) {
 		    n = OSPFS_BLKSIZE - *f_pos % OSPFS_BLKSIZE;
 		} else {
 		    n = count - amount;
 		}
 		eprintk("    copying %u bytes\n", n);
-		if (copy_from_user(&data[*f_pos % OSPFS_BLKSIZE], buffer, n) != 0) {
-		    retval = -EFAULT;
+		retval = copy_from_user(&data[*f_pos % OSPFS_BLKSIZE], buffer, n);
+		if (retval < 0) {
+		    
 		    goto done;
 		}
 
@@ -1456,8 +1464,8 @@ ospfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidat
     // Finding a new direntry.
     eprintk("    Will call create_blank_direntry(...)\n");
     ospfs_direntry_t *new_od = create_blank_direntry(dir_oi);
-    printk("    Left create_blank_direntry(...)\n");
-    printk("    new_od pointer points to %p\n", new_od);
+    eprintk("    Left create_blank_direntry(...)\n");
+    eprintk("    new_od pointer points to %p\n", new_od);
     if (IS_ERR(new_od)) {
         return PTR_ERR(new_od);
     }
@@ -1611,8 +1619,26 @@ ospfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 	ospfs_symlink_inode_t *oi =
 		(ospfs_symlink_inode_t *) ospfs_inode(dentry->d_inode->i_ino);
 	// Exercise: Your code here.
+	// Algorithm: using strsep to tokenize the string.
+	char *symlink = kzalloc(oi->oi_size + 1, GFP_ATOMIC);
+	memcpy(symlink, oi->oi_symlink, oi->oi_size);
+	char delim[] = "?:";
+	char *cond = strsep(&symlink, delim);
+	if (strcmp(cond, "root") == 0) {
+		char *path1 = strsep(&symlink, delim);
+		char *path2 = strsep(&symlink, delim);
+		if (path1 && path2) {
+			if (current->uid == 0) {
+				nd_set_link(nd, path1);
+			} else {
+				nd_set_link(nd, path2);
+			}
 
-	nd_set_link(nd, oi->oi_symlink);
+		}
+	} else {
+		nd_set_link(nd, oi->oi_symlink);
+	}
+	kfree(symlink);
 	return (void *) 0;
 }
 
